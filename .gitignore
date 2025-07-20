@@ -182,3 +182,5 @@ project/target
 .worksheet
 
 .vscode/settings.json
+
+./datasets/

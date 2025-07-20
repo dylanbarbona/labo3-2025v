@@ -2,6 +2,9 @@ import os
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import pickle
 
 def fill_tn_with_0(df):
@@ -86,10 +89,12 @@ def scale_tn(df, scaler_path=None, is_train=True):
     return df_scaled
 
 def create_delta_lag_features(df, group_col=['customer_id', 'product_id'], target_col='tn', max_lag=35):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
+
     result_columns = []
 
     for lag in range(1, max_lag + 1):
-        delta_lag = df.groupby(group_col, observed=True)[target_col].shift(lag).diff()
+        delta_lag = df.groupby(group_col, observed=True)[target_col].shift(lag - 1).diff()
         result_columns.append(delta_lag)
 
     result_df = pd.concat(result_columns, axis=1)
@@ -98,7 +103,8 @@ def create_delta_lag_features(df, group_col=['customer_id', 'product_id'], targe
     return result_df
 
 def create_lag_features(df, group_col=['customer_id', 'product_id'], target_col='tn', max_lag=35):
-    result_columns = []  # Lista para almacenar las nuevas columnas
+    df = df.sort_values(by=group_col + ['periodo_dt'])
+    result_columns = []
 
     for lag in range(1, max_lag + 1):
         lagged_values = df.groupby(group_col, observed=True)[target_col].shift(lag)
@@ -109,13 +115,14 @@ def create_lag_features(df, group_col=['customer_id', 'product_id'], target_col=
     return result_df
 
 def create_ma_features(df, group_col=['customer_id', 'product_id'], target_col='tn', max_window=36):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
     result_columns = []
 
     for w in range(1, max_window + 1):
         rolling_means = (
-            df.groupby(group_col, observed=True)[target_col]
-                .shift(1)
-                .rolling(window=w, min_periods=1)
+            df.groupby(group_col, observed=False)[target_col]
+                .shift(0)
+                .rolling(window=w, min_periods=w)
                 .mean()
         )
         result_columns.append(rolling_means)
@@ -126,14 +133,29 @@ def create_ma_features(df, group_col=['customer_id', 'product_id'], target_col='
 
     return result_df
 
+def create_delta_ma_features(df, group_col=['customer_id', 'product_id'], target_col='tn', max_lag=36):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
+
+    result_columns = []
+
+    for lag in range(2, max_lag + 1):
+        delta_ma = df[target_col] - df['tn_ma_' + str(lag)]         
+        result_columns.append(delta_ma)
+
+    result_df = pd.concat(result_columns, axis=1)
+    result_df.columns = [f'delta_{target_col}_ma_lag_{lag}' for lag in range(2, max_lag + 1)]
+
+    return result_df
+
 def create_std_features(df, group_col=['customer_id', 'product_id'], target_col='tn', max_window=36):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
     result_columns = []
 
     for w in range(1, max_window + 1):
         rolling_std = (
-            df.groupby(group_col, observed=True)[target_col]
-                .shift(1)
-                .rolling(window=w, min_periods=1)
+            df.groupby(group_col, observed=False)[target_col]
+                .shift(0)
+                .rolling(window=w, min_periods=w)
                 .std()
         )
         result_columns.append(rolling_std)
@@ -143,42 +165,35 @@ def create_std_features(df, group_col=['customer_id', 'product_id'], target_col=
     return result_df
         
 def create_min_features(df: pd.DataFrame, group_col=['customer_id', 'product_id'], target_col='tn', max_window=36):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
     result_columns = []
     
-    for w in range(2, max_window + 1):
-        rolling_min = df.groupby(group_col, observed=False)[target_col].shift(1).rolling(window=w, min_periods=1).min()
-        tn_lagged = df.groupby(group_col, observed=False)[target_col].shift(w)
+    for w in range(1, max_window + 1):
+        rolling_min = df.groupby(group_col, observed=False)[target_col].shift(0).rolling(window=w, min_periods=1).min()
+        tn_lagged = df.groupby(group_col, observed=False)[target_col].shift(w-1)
         is_min_col = tn_lagged == rolling_min
         result_columns.append(is_min_col)
 
     df_result = pd.concat(result_columns, axis=1)
-    df_result.columns = [f'{target_col}_is_min_{w}' for w in range(2, max_window + 1)]
+    df_result.columns = [f'{target_col}_is_min_{w}' for w in range(1, max_window + 1)]
 
     return df_result
 
 def create_max_features(df: pd.DataFrame, group_col=['customer_id', 'product_id'], target_col='tn', max_window=36):
+    df = df.sort_values(by=group_col + ['periodo_dt'])
     result_columns = []
     
-    for w in range(2, max_window + 1):
-        rolling_max = df.groupby(group_col, observed=False)[target_col].shift(1).rolling(window=w, min_periods=1).max()
-        tn_lagged = df.groupby(group_col, observed=False)[target_col].shift(w)
+    for w in range(1, max_window + 1):
+        rolling_max = df.groupby(group_col, observed=False)[target_col].shift(0).rolling(window=w, min_periods=1).max()
+        tn_lagged = df.groupby(group_col, observed=False)[target_col].shift(w-1)
         is_max_col = tn_lagged == rolling_max
         result_columns.append(is_max_col)
 
     df_result = pd.concat(result_columns, axis=1)
-    df_result.columns = [f'{target_col}_is_max_{w}' for w in range(2, max_window + 1)]
+    df_result.columns = [f'{target_col}_is_max_{w}' for w in range(1, max_window + 1)]
 
     return df_result
-
-def create_ratio_features(df):
-    # Calcular el ratio entre tn actual y tn de los próximos 2 periodos
-    df['tn_ratio_2'] = df.groupby(['customer_id','product_id'])['tn'].transform(lambda x: x / (x.shift(-1) + x.shift(-2)))
-
-    # Rellenar los valores NaN con 0 para los últimos 2 periodos de cada grupo
-    df['tn_ratio_2'] = df['tn_ratio_2'].fillna(0)
-
-    return df
-
+    
 def set_categorical_features(df):
     df['product_id'] = df['product_id'].astype('category')
     df['customer_id'] = df['customer_id'].astype('category')
@@ -191,7 +206,7 @@ def set_categorical_features(df):
 
 def limit_categorical_values(df, columns, max_values=250, other_prefix='other_'):
     for col in columns:
-        top_values = df[col].value_counts().nlargest(max_values).index
+        top_values = df.groupby(col)['tn'].sum().sort_values(ascending=False).head(max_values).index
         
         other_value = -1
         
@@ -272,3 +287,78 @@ def reduce_mem_usage(df):
                 df[col] = df[col].astype('category')
 
     return df
+
+def meses_sin_ventas(serie_sin_ventas: pd.Series) -> pd.Series:
+    sin_ventas = []
+    count = 0
+    for valor in serie_sin_ventas:
+        if valor == 1:
+            count += 1
+        else:
+            count = 0
+        sin_ventas.append(count)
+    return pd.Series(sin_ventas, index=serie_sin_ventas.index)
+
+
+def get_linear_regression_params(group):
+    y = group.values
+    X = np.arange(len(y)).reshape(-1, 1)
+
+    mask = ~np.isnan(y)
+    if mask.sum() < 2:
+        return pd.Series({'slope': 0.0, 'intercept': 0.0})
+
+    reg = LinearRegression()
+    reg.fit(X[mask], y[mask])
+
+    return pd.Series({'slope': reg.coef_[0], 'intercept': reg.intercept_, 'r_squared': reg.score(X[mask], y[mask])})
+
+def apply_loess_smoothing(group):
+    if len(group) < 2 or group.isna().all():
+        return pd.Series({
+            'loess_smoothed': 0,
+            'detrended_loess': 0,
+            'future_trend': 0
+        })
+    
+    time = np.arange(len(group))
+    values = group.values
+    
+    mask = ~np.isnan(values)
+    if sum(mask) < 2:
+        return pd.Series({
+            'loess_smoothed': 0, 
+            'detrended_loess': 0,
+            'future_trend': 0
+        })
+        
+    time_clean = time[mask]
+    values_clean = values[mask]
+    
+    try:
+        smoothed = lowess(values_clean, time_clean, frac=0.05)[:, 1]
+        
+        detrended = values_clean - smoothed
+        
+        model = ExponentialSmoothing(smoothed, trend="additive", seasonal=None, 
+                                   initialization_method="estimated")
+        fitted = model.fit()
+        future = fitted.forecast(1)[0]
+        
+        smoothed_full = np.zeros(len(group)) 
+        detrended_full = np.zeros(len(group))
+        smoothed_full[mask] = smoothed
+        detrended_full[mask] = detrended
+        
+        return pd.Series({
+            'loess_smoothed': smoothed_full[-1],
+            'detrended_loess': detrended_full[-1], 
+            'future_trend': future
+        })
+        
+    except:
+        return pd.Series({
+            'loess_smoothed': 0,
+            'detrended_loess': 0, 
+            'future_trend': 0
+        })
